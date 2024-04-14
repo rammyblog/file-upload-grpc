@@ -3,7 +3,7 @@
 
 syntax = 'proto3';
 
-option go_package = "github.com/rammyblog/file-upload-grpc/file_service";
+option go_package = "./protos";
 
 package filetransfer;
 
