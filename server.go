@@ -1,51 +1,110 @@
 package main
 
 import (
+	"context"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/joho/godotenv"
 	pb "github.com/rammyblog/file-upload-grpc/protos"
 	"google.golang.org/grpc"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
+	"time"
 )
 
-type server struct {
-	pb.UnimplementedFileServiceServer
+func generateRandomString(length int) string {
+	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+	return string(b)
 }
 
-func (s server) Upload(stream pb.FileService_UploadServer) error {
-	var fileName string
-	var fileData []byte
+type Server struct {
+	pb.UnimplementedFileServiceServer
+	uploader *manager.Uploader
+}
+
+func NewServer() *Server {
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+
+	s3Client := s3.NewFromConfig(cfg)
+	uploader := manager.NewUploader(s3Client)
+
+	return &Server{
+		uploader: uploader,
+	}
+}
+
+func (s Server) Upload(stream pb.FileService_UploadServer) error {
+	pr, pw := io.Pipe()
+	done := make(chan error)
+
+	go func() {
+		defer func(pw *io.PipeWriter) {
+			err := pw.Close()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}(pw)
+
+		filename := generateRandomString(30)
+		_, err := s.uploader.Upload(context.TODO(), &s3.PutObjectInput{
+			Bucket: aws.String(os.Getenv("AWS_BUCKET_NAME")), // Specify your S3 bucket name
+			Key:    aws.String(filename),
+			Body:   pr,
+		})
+		done <- err
+
+	}()
 
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
-			outFile, err := os.Create(fileName)
+			// close pipe
+			err := pw.Close()
 			if err != nil {
 				return err
 			}
-			defer func(outFile *os.File) {
-				err := outFile.Close()
-				if err != nil {
-					log.Fatal(err)
-				}
-			}(outFile)
-			if _, err := outFile.Write(fileData); err != nil {
-				return err
-			}
-			return stream.SendAndClose(&pb.FileUploadSuccess{
-				Success: true,
-				Message: "Upload success",
-			})
+
+			done <- nil
+			break
 		}
 		if err != nil {
-			return err
+			err := pw.CloseWithError(err)
+			if err != nil {
+				return err
+			}
 		}
-		fileName = "file_ser.proto"
-		fileData = append(fileData, req.Content...)
+
+		if _, err := pw.Write(req.Content); err != nil {
+			err = pw.CloseWithError(err)
+			if err != nil {
+				return err
+			}
+		}
 
 	}
 
+	// Wait for the upload to complete
+	if err := <-done; err != nil {
+		return err
+	}
+	return stream.SendAndClose(&pb.FileUploadSuccess{
+		Success: true,
+		Message: "Upload success",
+	})
 }
 
 func main() {
@@ -56,7 +115,12 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 
-	pb.RegisterFileServiceServer(grpcServer, new(server))
+	err = godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	pb.RegisterFileServiceServer(grpcServer, NewServer())
 	log.Println("Server listening at", lis.Addr())
 
 	if err := grpcServer.Serve(lis); err != nil {

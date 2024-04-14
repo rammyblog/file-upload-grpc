@@ -1,3 +1,4 @@
-./github.com
 .idea
 tmp
+.DS_Store
+.env

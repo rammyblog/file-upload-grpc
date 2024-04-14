@@ -27,6 +27,7 @@ func uploadFile(client pb.FileServiceClient, filePath string) {
 			log.Fatalf("file.Close(_) = %v", err)
 		}
 	}(file)
+
 	buf := make([]byte, 1024)
 
 	for {
