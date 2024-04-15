@@ -60,6 +60,8 @@ func (s Server) WriteToPipe(pw *io.PipeWriter, content []byte) error {
 }
 
 func (s Server) Upload(stream pb.FileService_UploadServer) error {
+	startTime := time.Now()
+	var totalSize int64 = 0
 	req, err := stream.Recv() // First, receive to get the filename
 	if err != nil {
 		return err
@@ -82,6 +84,8 @@ func (s Server) Upload(stream pb.FileService_UploadServer) error {
 		})
 		done <- err
 	}()
+
+	totalSize += int64(len(req.Content))
 	err = s.WriteToPipe(pw, req.Content)
 	if err != nil {
 		return err
@@ -106,13 +110,17 @@ func (s Server) Upload(stream pb.FileService_UploadServer) error {
 		if err != nil {
 			return err
 		}
-
+		totalSize += int64(len(req.Content))
 	}
 
 	// Wait for the upload to complete
 	if err := <-done; err != nil {
 		return err
 	}
+	endTime := time.Now()
+	diff := endTime.Sub(startTime)
+	log.Printf("Upload started by %s, ended by %s. \n with a difference of %s", startTime, endTime, diff)
+	log.Printf("We transferred %v", totalSize)
 	return stream.SendAndClose(&pb.FileUploadSuccess{
 		Success: true,
 		Message: "Upload success",
