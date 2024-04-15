@@ -14,17 +14,19 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"path"
 	"time"
 )
 
-func generateRandomString(length int) string {
+func generateRandomFileNameString(length int, filePath string) string {
 	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
 	b := make([]byte, length)
 	for i := range b {
 		b[i] = charset[seededRand.Intn(len(charset))]
 	}
-	return string(b)
+	ext := path.Ext(filePath)
+	return string(b) + ext
 }
 
 type Server struct {
@@ -47,7 +49,22 @@ func NewServer() *Server {
 	}
 }
 
+func (s Server) WriteToPipe(pw *io.PipeWriter, content []byte) error {
+	if _, err := pw.Write(content); err != nil {
+		err = pw.CloseWithError(err)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s Server) Upload(stream pb.FileService_UploadServer) error {
+	req, err := stream.Recv() // First, receive to get the filename
+	if err != nil {
+		return err
+	}
+	randomFileName := generateRandomFileNameString(30, req.Filename)
 	pr, pw := io.Pipe()
 	done := make(chan error)
 
@@ -58,17 +75,17 @@ func (s Server) Upload(stream pb.FileService_UploadServer) error {
 				log.Fatal(err)
 			}
 		}(pw)
-
-		filename := generateRandomString(30)
 		_, err := s.uploader.Upload(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws.String(os.Getenv("AWS_BUCKET_NAME")), // Specify your S3 bucket name
-			Key:    aws.String(filename),
+			Key:    aws.String(randomFileName),
 			Body:   pr,
 		})
 		done <- err
-
 	}()
-
+	err = s.WriteToPipe(pw, req.Content)
+	if err != nil {
+		return err
+	}
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
@@ -77,8 +94,6 @@ func (s Server) Upload(stream pb.FileService_UploadServer) error {
 			if err != nil {
 				return err
 			}
-
-			done <- nil
 			break
 		}
 		if err != nil {
@@ -87,12 +102,9 @@ func (s Server) Upload(stream pb.FileService_UploadServer) error {
 				return err
 			}
 		}
-
-		if _, err := pw.Write(req.Content); err != nil {
-			err = pw.CloseWithError(err)
-			if err != nil {
-				return err
-			}
+		err = s.WriteToPipe(pw, req.Content)
+		if err != nil {
+			return err
 		}
 
 	}
